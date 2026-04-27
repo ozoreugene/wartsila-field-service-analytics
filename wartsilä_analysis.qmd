@@ -1,0 +1,536 @@
+---
+title: "Field Service Analytics: Wartsila Engine Maintenance Performance"
+author: "Eugene Ozor"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+---
+
+## 1. Executive Summary
+
+This study applies five exploratory and inferential analytics techniques to 100 field service records drawn from Wartsila engine maintenance operations, spanning multiple engine models (W20 to W50) and three fault categories; Maintenance, Troubleshooting, and Health Check. The central business question is: what factors drive variability in repair time, and how can these insights improve field service planning and SLA management?
+
+Exploratory analysis revealed a strongly right-skewed repair time distribution, with Maintenance jobs averaging 519 hours compared to just 72 hours for Troubleshooting events. Visualization confirmed that the W46 engine model displays the highest repair time variability across the fleet. Hypothesis testing identified problem category as the dominant driver of repair duration, with a large and highly significant effect (p \< 0.001). Correlation analysis found that personnel deployment is the only continuous variable significantly associated with repair time, while engine operating hours showed no meaningful linear relationship. Multiple regression confirmed the joint significance of all predictors (p = 0.006, R² = 0.22), with problem category and engine model contributing the largest directional effects.
+
+The analysis collectively supports one recommendation: Wartsila should implement a formally differentiated job-planning framework that assigns separate time budgets, crew configurations, and parts pre-positioning strategies to Maintenance versus Troubleshooting events, with specific attention to W46 engine platforms.
+
+## 2. Professional Disclosure
+
+**Job Title:** Field Service Engineer\
+**Organisation:** Wartsila Power & Marine Services Nig. Limited\
+**Sector:** Marine & Power Plant Engineering Services
+
+I am a Field Service Engineer at Wartsila, responsible for the commissioning, troubleshooting, and maintenance of dual-fuel (diesel-gas) engines deployed on marine vessels and land-based power plants. My work involves diagnosing mechanical and fuel-system faults under time pressure, coordinating multi-person service teams, and ensuring engines return to operational status within contractual service-level windows.
+
+I use the following techniques in my analytics because of how they impact my work in the field and aid me in achieving the needed result.
+
+**Exploratory Data Analysis:** Before any maintenance decision can be made, I need to understand the baseline distribution of repair durations, fault frequencies, and cost drivers across engine models. EDA directly mirrors the first step in any field diagnostic, assessing the landscape before prescribing action.
+
+**Data Visualisation:** Maintenance reports at Wartsila must communicate findings to both technical engineers and non-technical managers. Visualising fault patterns by engine model and problem category supports faster operational decisions at the field level.
+
+**Hypothesis Testing:** A recurring operational question is whether certain fault categories or engine models consistently produce longer repair times. Formal hypothesis testing replaces anecdotal engineering judgement with statistically defensible conclusions that can support contract renegotiation and resource planning.
+
+**Correlation Analysis:** Understanding which variables such as operating hours, personnel count, and problem category move together with repair time allows Wartsila to build more accurate service cost models and deploy field teams more efficiently.
+
+**Linear Regression:** A regression model predicting repair time from observable job characteristics (fault type, engine model, personnel deployed, operating hours) directly supports SLA management — if I can estimate repair duration at the point of fault diagnosis, vessel operators can make informed decisions about port scheduling and cargo commitments.
+
+## 3. Data Collection & Sampling
+
+**Data source:** Internal Wartsila field service work records extracted from company's database, personal maintenance logs and job completion reports.
+
+**Collection method:** Job card data was manually compiled from field service documentation produced during active maintenance assignments. Each row represents one discrete maintenance or repair event.
+
+**Variables collected:**
+
+| Variable | Type | Description |
+|------------------------|------------------------|------------------------|
+| `service_date` | Date | Date the service job was completed |
+| `engine_model` | Categorical | Wartsila engine model identifier |
+| `problem_category` | Categorical | Fault system category (e.g. Troubleshooting, Planned maintenance) |
+| `repair_time_hours` | Numeric | Total hours from fault diagnosis to resolution |
+| `operating_hours` | Numeric | Engine operating hours at point of fault |
+| `personnel_count` | Numeric | Number of technicians deployed on the job |
+
+**Sample frame:** All service jobs attended by field service team in the African region from the year 2015 - 2025.
+
+**Sample size:** 100 observations.
+
+**Statistical rationale:** With n = 100, the dataset meets the minimum threshold for parametric inference under the Central Limit Theorem. It provides sufficient degrees of freedom for a multiple regression model with up to 8 predictors without overfitting risk.
+
+**Ethical notes:** All data relates to equipment performance, not individuals. No personally identifiable information is included. Engine model identifiers and problem codes are standard Wartsila technical nomenclature.
+
+## 4. Data Description
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load all required packages
+library(tidyverse)
+library(readxl)
+library(skimr)
+library(corrplot)
+library(car)
+library(rstatix)
+library(effectsize)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+
+# Load your data — make sure your Excel file is in the same folder as your .qmd
+df <- read_excel("wartsilä_service_data.xlsx")
+
+# Convert types correctly
+df <- df %>%
+  mutate(
+    service_date     = as.Date(service_date),
+    engine_model     = as.factor(engine_model),
+    problem_category = as.factor(problem_category),
+    repair_time_hours = as.numeric(repair_time_hours),
+    operating_hours  = as.numeric(operating_hours),
+    personnel_count  = as.numeric(personnel_count)
+  )
+
+# Quick preview
+glimpse(df)
+```
+
+## 5. Exploratory Data Analysis
+
+```{r eda, message=FALSE, warning=FALSE}
+# ── 1. Full summary ──────────────────────────────────────────────
+skim(df)
+
+# ── 2. Missing values ────────────────────────────────────────────
+missing_summary <- data.frame(
+  Variable = names(df),
+  Missing  = colSums(is.na(df)),
+  Pct      = round(colSums(is.na(df)) / nrow(df) * 100, 1)
+)
+kable(missing_summary, caption = "Missing Value Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# ── 3. Outlier detection on repair_time_hours ────────────────────
+Q1 <- quantile(df$repair_time_hours, 0.25, na.rm = TRUE)
+Q3 <- quantile(df$repair_time_hours, 0.75, na.rm = TRUE)
+IQR_val <- Q3 - Q1
+
+df <- df %>%
+  mutate(outlier = repair_time_hours < (Q1 - 1.5 * IQR_val) |
+                   repair_time_hours > (Q3 + 1.5 * IQR_val))
+
+cat("Number of outliers detected in repair_time_hours:",
+    sum(df$outlier, na.rm = TRUE), "\n")
+
+
+# ── 4. Distribution of outcome variable ──────────────────────────
+ggplot(df, aes(x = repair_time_hours)) +
+  geom_histogram(bins = 20, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = mean(df$repair_time_hours, na.rm = TRUE),
+             colour = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Distribution of Repair Time Hours",
+       subtitle = "Red dashed line = mean",
+       x = "Repair Time (Hours)", y = "Frequency") +
+  theme_minimal()
+
+
+# ── 5. Summary stats by problem_category ─────────────────────────
+df %>%
+  group_by(problem_category) %>%
+  summarise(
+    n         = n(),
+    mean_hrs  = round(mean(repair_time_hours, na.rm = TRUE), 2),
+    median_hrs = round(median(repair_time_hours, na.rm = TRUE), 2),
+    sd_hrs    = round(sd(repair_time_hours, na.rm = TRUE), 2)
+  ) %>%
+  arrange(desc(mean_hrs)) %>%
+  kable(caption = "Repair Time Summary by Problem Category") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+### Interpretation
+
+The repair time distribution is strongly right-skewed, with the majority of jobs (approximately 64 out of 101) completed within 500 hours, while a small number of extreme events extended beyond 2,000 hours including one job recorded at approximately 3,500 hours. The mean repair time of approximately 300 hours sits well above the median, confirming this skew and indicating that a handful of complex, high-duration jobs disproportionately inflate the average. This pattern is consistent with real-world field service operations, where routine preventive maintenance dominates by volume but occasional major overhauls dominate by duration.
+
+Two data quality issues were identified and addressed. First, the extreme upper tail (jobs exceeding the 95th percentile) was excluded from visualisations to prevent distortion, though all observations were retained for inferential analyses. Second, the Health Check category contained only one observation, which is insufficient for group-level statistical testing; this group was excluded from hypothesis testing but retained in descriptive summaries.
+
+The summary by problem category reveals a striking operational contrast: Maintenance jobs (n = 72) averaged 518.67 hours per repair with high variability (SD = 656.64 hours), reflecting the mix of routine servicing and complex overhauls within this category. Troubleshooting jobs (n = 27), by contrast, averaged just 72 hours with low variability (SD = 66.23 hours), suggesting that fault diagnosis and targeted repair is a faster, more predictable activity than scheduled maintenance work.
+
+## 6. Data Visualization
+
+```{r visualisation, message=FALSE, warning=FALSE, fig.width=14, fig.height=18}
+
+# ── Remove extreme outliers for visualisation only ───────────────
+# (We keep them in the data for analysis — just cleaner to plot without)
+df_plot <- df %>%
+  filter(repair_time_hours <= quantile(repair_time_hours, 0.95, na.rm = TRUE))
+
+# ── Plot 1: Fault frequency by problem_category ──────────────────
+p1 <- ggplot(df_plot, aes(x = fct_infreq(problem_category),
+                           fill = problem_category)) +
+  geom_bar(width = 0.6) +
+  coord_flip() +
+  scale_fill_manual(values = c("#2196F3", "#4CAF50", "#FF9800")) +
+  labs(title = "1. Fault Frequency by Category",
+       x = NULL, y = "Number of Jobs") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+# ── Plot 2: Repair time by engine_model ──────────────────────────
+p2 <- ggplot(df_plot, aes(x = engine_model, y = repair_time_hours,
+                           fill = engine_model)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +  # hide outliers in box
+  coord_cartesian(ylim = c(0, quantile(df_plot$repair_time_hours,
+                                        0.90, na.rm = TRUE))) +
+  labs(title = "2. Repair Time by Engine Model",
+       x = "Engine Model", y = "Repair Hours") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        plot.title = element_text(face = "bold"))
+
+# ── Plot 3: Monthly average repair time trend ────────────────────
+p3 <- df_plot %>%
+  arrange(service_date) %>%
+  mutate(month = floor_date(service_date, "month")) %>%
+  group_by(month) %>%
+  summarise(avg_repair = mean(repair_time_hours, na.rm = TRUE),
+            .groups = "drop") %>%
+  ggplot(aes(x = month, y = avg_repair)) +
+  geom_line(colour = "#2196F3", linewidth = 1) +
+  geom_smooth(method = "loess", se = TRUE,
+              colour = "#F44336", linetype = "dashed", linewidth = 0.8) +
+  labs(title = "3. Monthly Average Repair Time Trend",
+       x = "Month", y = "Avg Repair Hours") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+# ── Plot 4: Operating hours vs repair time ───────────────────────
+p4 <- ggplot(df_plot, aes(x = operating_hours, y = repair_time_hours,
+                           colour = problem_category)) +
+  geom_point(alpha = 0.65, size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE,
+              colour = "black", linetype = "dashed", linewidth = 0.8) +
+  scale_colour_manual(values = c("#E91E63", "#4CAF50", "#2196F3")) +
+  labs(title = "4. Operating Hours vs Repair Time",
+       x = "Operating Hours at Fault",
+       y = "Repair Hours",
+       colour = "Category") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+# ── Plot 5: Personnel count vs repair time ───────────────────────
+p5 <- ggplot(df_plot, aes(x = as.factor(personnel_count),
+                           y = repair_time_hours,
+                           fill = as.factor(personnel_count))) +
+  geom_violin(trim = TRUE, alpha = 0.6) +
+  geom_boxplot(width = 0.12, fill = "white", outlier.shape = NA) +
+  coord_cartesian(ylim = c(0, quantile(df_plot$repair_time_hours,
+                                        0.90, na.rm = TRUE))) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "5. Repair Time by Personnel Deployed",
+       x = "Number of Technicians", y = "Repair Hours") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+# ── Combined layout — stacked vertically for breathing room ──────
+(p1 / p2 / p3 / p4 / p5) +
+  plot_annotation(
+    title = "Wartsila Field Service: Five-View Diagnostic Dashboard",
+    subtitle = "Based on 100 field service jobs | Extreme outliers (>95th percentile) excluded for visual clarity",
+    theme = theme(
+      plot.title    = element_text(size = 18, face = "bold"),
+      plot.subtitle = element_text(size = 14, colour = "grey40")
+    )
+  )
+```
+
+### Interpretation
+
+The five-panel diagnostic dashboard tells a coherent story about the structure of Wartsila field service operations across the data-set period.
+
+Panel 1 confirms that Maintenance dominates the workload, accounting for over 70% of all jobs, with Troubleshooting representing the remainder and Health Checks being rare events. This distribution reflects the planned nature of most engine service interventions.
+
+Panel 2 reveals meaningful variation in repair time across engine models. The W46 model shows the widest interquartile range, suggesting greater unpredictability in service duration, while the W20 and W26 models show tighter, more consistent repair profiles. This has implications for spare-parts pre-positioning and crew scheduling on vessels operating different engine types.
+
+Panel 3 shows no consistent upward or downward trend in monthly average repair time over the observation period, though notable spikes are visible at several points, likely corresponding to major overhaul events. The LOESS smoothing line remains broadly flat, suggesting operational stability over time.
+
+Panel 4 shows that operating hours at the point of fault has little visual association with repair duration, with data points scattered without clear directionality across all three problem categories. This is later confirmed statistically by the near-zero correlation coefficient.
+
+Panel 5 demonstrates that deploying more technicians does not uniformly reduce repair time in fact, jobs with three technicians show the widest spread of duration. This counterintuitive finding likely reflects that more complex jobs both require larger teams and take longer to resolve, rather than team size itself causing delays.
+
+## 7. Hypothesis
+
+```{r}
+
+# ── Check group sizes first ──────────────────────────────────────
+group_sizes <- df %>%
+  count(problem_category) %>%
+  rename(n_observations = n)
+
+kable(group_sizes, caption = "Observations per Problem Category") %>%
+  kable_styling(bootstrap_options = "striped")
+
+# ── Keep only categories with 3+ observations for normality test ─
+valid_categories <- group_sizes %>%
+  filter(n_observations >= 3) %>%
+  pull(problem_category)
+
+df_valid <- df %>%
+  filter(problem_category %in% valid_categories)
+
+# ════════════════════════════════════════════════════════
+# HYPOTHESIS 1
+# H₀: Mean repair time is equal across all problem categories
+# H₁: At least one category has a significantly different mean
+# ════════════════════════════════════════════════════════
+
+# Normality test (only on valid groups)
+normality_test <- df_valid %>%
+  group_by(problem_category) %>%
+  shapiro_test(repair_time_hours)
+
+kable(normality_test, caption = "Shapiro-Wilk Test by Category (groups ≥ 3 obs)") %>%
+  kable_styling(bootstrap_options = "striped")
+
+# Decision: if any group is non-normal, use Kruskal-Wallis instead of ANOVA
+any_nonnormal <- any(normality_test$p < 0.05, na.rm = TRUE)
+
+if (any_nonnormal) {
+  cat("Non-normality detected — using Kruskal-Wallis (non-parametric alternative)\n\n")
+  kruskal_result <- kruskal.test(repair_time_hours ~ problem_category,
+                                  data = df_valid)
+  print(kruskal_result)
+
+  # Effect size for Kruskal-Wallis (epsilon squared)
+  df_valid %>%
+    kruskal_effsize(repair_time_hours ~ problem_category)
+
+} else {
+  cat("Normality assumption met — using one-way ANOVA\n\n")
+  anova_model <- aov(repair_time_hours ~ problem_category, data = df_valid)
+  summary(anova_model)
+  eta_squared(anova_model, partial = FALSE)
+  TukeyHSD(anova_model)
+}
+
+# ════════════════════════════════════════════════════════
+# HYPOTHESIS 2
+# H₀: Mean repair time is equal across all engine models
+# H₁: At least one engine model has a significantly different mean
+# ════════════════════════════════════════════════════════
+
+# Same approach — check group sizes for engine_model
+engine_sizes <- df %>%
+  count(engine_model) %>%
+  rename(n_observations = n)
+
+valid_engines <- engine_sizes %>%
+  filter(n_observations >= 3) %>%
+  pull(engine_model)
+
+df_valid2 <- df %>%
+  filter(engine_model %in% valid_engines)
+
+normality_test2 <- df_valid2 %>%
+  group_by(engine_model) %>%
+  shapiro_test(repair_time_hours)
+
+any_nonnormal2 <- any(normality_test2$p < 0.05, na.rm = TRUE)
+
+if (any_nonnormal2) {
+  cat("Non-normality detected — using Kruskal-Wallis for engine model comparison\n\n")
+  kruskal_result2 <- kruskal.test(repair_time_hours ~ engine_model,
+                                   data = df_valid2)
+  print(kruskal_result2)
+  df_valid2 %>%
+    kruskal_effsize(repair_time_hours ~ engine_model)
+
+} else {
+  cat("Normality assumption met — using one-way ANOVA\n\n")
+  anova_model2 <- aov(repair_time_hours ~ engine_model, data = df_valid2)
+  summary(anova_model2)
+  eta_squared(anova_model2, partial = FALSE)
+  TukeyHSD(anova_model2)
+}
+```
+
+### Interpretation
+
+Prior to testing, Shapiro-Wilk normality tests were conducted on all problem categories with three or more observations. Both Maintenance (W = 0.693, p \< 0.001) and Troubleshooting (W = 0.752, p \< 0.001) violated the normality assumption. Accordingly, the non-parametric Kruskal-Wallis rank-sum test was applied as the appropriate alternative to one-way ANOVA, following the assumption-checking protocol recommended in the course textbook (Adi, 2026, Ch. 6).
+
+**Hypothesis 1 — Problem Category**
+
+H₀: The median repair time is equal across all problem categories. H₁: At least one problem category has a significantly different median repair time.
+
+The Kruskal-Wallis test returned a highly significant result (H = 33.251, df = 1, p = 8.1×10⁻⁹), leading to rejection of the null hypothesis. The effect size was large (η²\[H\] = 0.332), meaning that problem category alone accounts for approximately 33% of the variation in repair time ranks a substantial practical effect. Maintenance jobs take significantly longer to complete than Troubleshooting jobs, with median repair times of 300 hours versus 48 hours respectively.
+
+For Wartsila field operations, this finding has a direct implication: Maintenance jobs should not be scheduled under the same time assumptions as Troubleshooting callouts. Contract SLAs, vessel scheduling windows, and technician deployment plans should differentiate explicitly between these two job types, with Maintenance events allocated at least six times the planning duration of Troubleshooting events.
+
+**Hypothesis 2 — Engine Model**
+
+H₀: The median repair time is equal across all engine models. H₁: At least one engine model has a significantly different median repair time.
+
+The Kruskal-Wallis test also returned a significant result for engine model (H = 10.287, df = 4, p = 0.036), again leading to rejection of the null hypothesis. The effect size was moderate (η²\[H\] = 0.067), indicating that engine model explains approximately 7% of rank variation in repair time a meaningful but more modest effect than problem category. This suggests that while the type of fault is the dominant driver of repair duration, the specific engine platform also introduces statistically significant variability, likely reflecting differences in mechanical complexity and parts accessibility across the W20, W26, W32, W34, W46, and W50 families.
+
+## 8. Correlation
+
+```{r correlation, message=FALSE, warning=FALSE}
+# Select numeric variables only
+num_df <- df %>%
+  select(repair_time_hours, operating_hours, personnel_count) %>%
+  drop_na()
+
+# ── Pearson correlation matrix ───────────────────────────────────
+cor_pearson <- cor(num_df, method = "pearson")
+kable(round(cor_pearson, 3),
+      caption = "Pearson Correlation Matrix") %>%
+  kable_styling(bootstrap_options = "striped")
+
+# ── Spearman (robustness check) ──────────────────────────────────
+cor_spearman <- cor(num_df, method = "spearman")
+
+# ── Heatmap ──────────────────────────────────────────────────────
+corrplot(cor_pearson,
+         method   = "color",
+         type     = "upper",
+         addCoef.col = "black",
+         tl.col   = "black",
+         col      = colorRampPalette(c("#d73027","white","#4575b4"))(200),
+         title    = "Pearson Correlation: Wärtsilä Service Variables",
+         mar      = c(0, 0, 2, 0))
+
+# ── Significance tests ───────────────────────────────────────────
+cor_test_1 <- cor.test(df$repair_time_hours, df$operating_hours)
+cor_test_2 <- cor.test(df$repair_time_hours, df$personnel_count)
+
+cat("Repair time vs Operating hours: r =",
+    round(cor_test_1$estimate, 3),
+    ", p =", round(cor_test_1$p.value, 4), "\n")
+cat("Repair time vs Personnel count: r =",
+    round(cor_test_2$estimate, 3),
+    ", p =", round(cor_test_2$p.value, 4), "\n")
+```
+
+### Interpretation
+
+The Pearson correlation matrix reveals that the numeric variables in this data-set are only weakly intercorrelated, which has important analytical implications.
+
+The strongest correlation observed is between personnel_count and repair_time_hours (r = 0.211, p = 0.035). This is statistically significant at the 5% level, though the effect is modest in magnitude. The positive direction indicates that jobs deploying more technicians tend to have longer repair duration, a finding that may initially appear counter-intuitive. However, this relationship is more plausibly explained by reverse causation: it is not that more technicians cause longer repairs, but rather that longer, more complex jobs require larger teams. In operational terms, personnel_count functions as a proxy for job complexity rather than an independent driver of duration.
+
+The correlation between operating_hours and repair_time_hours is negligible and statistically non-significant (r = 0.046, p = 0.652). This is a notable finding: it suggests that engine age or accumulated runtime contrary to what might be expected does not meaningfully predict repair duration within this dataset. One possible explanation is that Wartsila's preventive maintenance programme successfully intervenes before age-related deterioration translates into longer repair events.
+
+The near-zero correlation between operating_hours and personnel_count (r = 0.067) confirms that these two predictors are essentially independent of one another, which is a favourable property for the subsequent regression model as it reduces concerns about multicollinearity between these variables.
+
+Overall, the weak linear correlations among numeric variables suggest that the primary drivers of repair time in this data-set are categorical in nature specifically, problem category and engine model rather than continuous operational parameters.
+
+## 9. Regression
+
+```{r regression, message=FALSE, warning=FALSE}
+# ── Build the model ──────────────────────────────────────────────
+# Drop rows with any NA in model variables
+df_model <- df %>%
+  select(repair_time_hours, operating_hours,
+         personnel_count, problem_category, engine_model) %>%
+  drop_na()
+
+model <- lm(repair_time_hours ~ operating_hours +
+                                personnel_count +
+                                problem_category +
+                                engine_model,
+            data = df_model)
+
+summary(model)
+
+# ── Model fit table ──────────────────────────────────────────────
+kable(broom::tidy(model), digits = 3,
+      caption = "Regression Coefficients") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# ── Diagnostic plots ─────────────────────────────────────────────
+par(mfrow = c(2, 2))
+plot(model, col = "steelblue", pch = 16)
+par(mfrow = c(1, 1))
+
+# ── Multicollinearity check ──────────────────────────────────────
+vif_vals <- vif(model)
+print(vif_vals)
+```
+
+### Interpretation
+
+A multiple linear regression model was fitted with repair_time_hours as the outcome variable and operating_hours, personnel_count, problem_category, and engine_model as predictors.
+
+**Model fit:** The model was statistically significant overall (F = 2.814, df = 9, 90, p = 0.006), confirming that the predictors collectively explain a non-trivial portion of variance in repair time. The model explains 21.96% of the total variance in repair time (R² = 0.220), with an adjusted R² of 0.142 after penalising for the number of predictors. While this leaves approximately 78% of variance unexplained reflecting the inherent unpredictability of field maintenance events it is a meaningful starting point given the limited set of variables available.
+
+**Individual predictors:** No single predictor reached conventional statistical significance (p \< 0.05) in isolation, which is consistent with the modest correlation coefficients observed in the previous section. However, several coefficients carry operational relevance:
+
+-   **personnel_count** (β = 63.6, p = 0.179): Each additional technician deployed is associated with approximately 64 additional repair hours, on average. As discussed in the correlation section, this most likely reflects that complex jobs attract larger teams rather than implying that adding technicians prolongs repairs.
+
+-   **problem_categoryMaintenance** (β = 565.2, p = 0.314): Maintenance jobs are associated with approximately 565 additional hours of repair time compared to the Health Check reference category, consistent with the hypothesis testing results. The wide confidence interval reflects high within-category variability.
+
+-   **engine_modelW46** (β = 513.8, p = 0.408): The W46 engine is associated with approximately 514 additional repair hours compared to the W20 reference model, though this does not reach significance likely due to limited observations per engine model subgroup.
+
+**Multicollinearity:** Generalised Variance Inflation Factor (GVIF) values for all predictors were below 1.6, well under the conventional threshold of 5, confirming that multicollinearity is not a concern in this model.
+
+**Diagnostic plots:** The Residuals vs Fitted plot shows a mild funnel pattern indicating heteroscedasticity variance in residuals increases with fitted values. The Q-Q plot reveals significant departure from normality in the upper tail, driven by the extreme high-duration jobs (observations 53, 67, 81). The Scale-Location plot confirms increasing spread at higher fitted values. Observation 36 shows elevated leverage in the Residuals vs Leverage plot but does not exceed Cook's distance thresholds, so no observations were removed.
+
+These diagnostic findings suggest that a log-transformation of repair_time_hours, or a generalised linear model with a gamma distribution, would improve model fit in future work. For the purposes of this analysis, the OLS model provides interpretable directional estimates and a valid overall significance test.
+
+## 10. Integrated Findings
+
+Taken together, the five analytical techniques converge on a coherent and actionable picture of Wartsila engine maintenance operations.
+
+The EDA established that repair time is highly right-skewed, dominated in volume by Maintenance jobs but in duration by a small number of extreme events. The visualisation dashboard confirmed that this pattern holds across engine models, with the W46 platform showing the greatest variability and Troubleshooting jobs consistently resolving faster and more predictably than Maintenance interventions.
+
+Hypothesis testing provided the strongest and most statistically compelling finding of the analysis: problem category is a highly significant determinant of repair duration (H = 33.251, p = 8.1×10⁻⁹, η²\[H\] = 0.332, large effect). Maintenance jobs take a median of 300 hours compared to 48 hours for Troubleshooting — a sixfold difference with profound implications for resource planning. Engine model also contributes significantly, though with a more modest effect size (η²\[H\] = 0.067), with the W46 platform emerging as the most time-intensive across both analyses.
+
+Correlation analysis revealed that among the continuous variables, only personnel_count shows a meaningful and statistically significant association with repair time (r = 0.211, p = 0.035). Operating hours, counterintuitively, has no meaningful linear relationship with repair duration, suggesting that Wartsila's maintenance scheduling effectively prevents age-driven deterioration from translating into longer repairs.
+
+The regression model, while explaining 22% of variance in repair time, confirmed that the predictors collectively have a significant joint effect (p = 0.006). The absence of individually significant coefficients reflects high within-category variability and the modest sample size rather than a lack of real-world relationships. Diagnostic plots identified heteroscedasticity and non-normal residuals as limitations warranting future methodological refinement.
+
+**Single overarching recommendation:** Wartsila's field service scheduling and SLA framework should formally differentiate between Maintenance and Troubleshooting job types, assigning distinct time budgets, crew sizes, and spare-parts loadouts to each. Specifically, Maintenance events on W46 engines should be flagged for extended planning windows of at least 500 hours, two-person teams as a minimum, and pre-positioned major components. This data-driven approach to job classification has the potential to meaningfully reduce unplanned vessel downtime and improve contract SLA compliance across Wartsila's field service portfolio.
+
+## 11. Limitations & Further Work
+
+-   Sample size of 100 limits the degrees of freedom available for interaction terms in regression.
+-   With access to Wartsila's full global database, a multilevel model accounting for vessel-level clustering would be more appropriate.
+-   The data on parts cost could not be collected during this project. Future work should incorporate parts cost data to extend the model to a full cost-prediction framework.
+
+## References
+
+Adi, B. (2026). *AI-powered business analytics: A practical textbook for data-driven decision making.* Lagos Business School / markanalytics.online. <https://markanalytics.online>
+
+R Core Team. (2024). *R: A language and environment for statistical computing* (Version 4.x). R Foundation for Statistical Computing. <https://www.R-project.org/>
+
+Wickham, H., et al. (2019). Welcome to the tidyverse. *Journal of Open Source Software, 4*(43), 1686. <https://doi.org/10.21105/joss.01686>
+
+Wickham, H. (2016). *ggplot2: Elegant graphics for data analysis.* Springer. <https://doi.org/10.1007/978-3-319-24277-4>
+
+Waring E, Quinn M, McNamara A, Arino de la Rubia E, Zhu H, Ellis S (2026). <https://doi.org/10.32614/CRAN.package.skimr>,
+
+Taiyun Wei and Viliam Simko (2024). R package 'corrplot'*: Visualization of a Correlation Matrix (Version 0.95).* Available from <https://github.com/taiyun/corrplot>
+
+Fox J, Weisberg S (2019). *An R Companion to Applied Regression, Third edition. Sage, Thousand Oaks CA.* <https://www.john-fox.ca/Companion/>.
+
+Kassambara A (2025)*. rstatix: Pipe-Friendly Framework for Basic Statistical Tests. doi:10.32614/CRAN.package.rstatix* <https://doi.org/10.32614/CRAN.package.rstatix>, R package version 0.7.3, <https://CRAN.R-project.org/package=rstatix>.
+
+Ben-Shachar M, Lüdecke D, Makowski D (2020)*. effectsize: Estimation of Effect Size Indices and Standardized Parameters. Journal of Open Source Software, 5(56), 2815. doi: 10.21105/joss.02815*
+
+Pedersen T (2025). patchwork: *The Composer of Plots. doi:10.32614/CRAN.package.patchwork* <https://doi.org/10.32614/CRAN.package.patchwork>, R package version 1.3.2, <https://CRAN.R-project.org/package=patchwork>.
+
+A, Henry L, Hester J, Kuhn M, Pedersen TL, Miller E, Bache SM, Müller K, Ooms J, Robinson D, Seidel DP, Spinu V, Takahashi K, Vaughan D, Wilke C, Woo K, Yutani H (2019)*. “Welcome to the tidyverse.” Journal of Open Source Software, 4(43), 1686. doi:10.21105/joss.01686* <https://doi.org/10.21105/joss.01686>.
+
+H. Wickham. ggplot2*: Elegant Graphics for Data Analysis. Springer-Verlag New York, 2016.*
+
+```         
+```
+
+## Appendix: AI Usage Statement
+
+Claude (Anthropic) was used to assist with R code structure, package selection, and document formatting. All analytical decisions including technique selection, hypothesis formulation, result interpretation, and business recommendations were made independently based on my professional knowledge as a Wartsila Field Service Engineer. I reviewed, tested, and validated every code block against my own data-set before including it in this submission.
