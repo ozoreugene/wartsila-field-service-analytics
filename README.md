@@ -30,7 +30,7 @@ implications for Wärtsilä field service SLA planning.
 | `wartsilä_service_data.xlsx` | Anonymised field service dataset |
 
 ## Live Report
-Published on RPubs: [insert your RPubs URL here]
+Published on RPubs: https://rpubs.com/ozoreugene/DA2_EXAM_Field_Service_Analytics
 
 ## Tools
 R · Quarto · tidyverse · ggplot2 · corrplot · rstatix · car · effectsize
